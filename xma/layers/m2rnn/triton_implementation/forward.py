@@ -26,10 +26,15 @@ def _get_autotune_configs() -> list[triton.Config]:
 @triton.jit
 def _forward_single_step(h_prev, W, k, v, f):
     x = matmul(A=k[:, None], B=v[None, :], C=None, output_dtype=k.dtype)
-    z = matmul(A=h_prev, B=W, C=x, output_dtype=tl.float32)
+    # tl.dot needs matching operand dtypes; h_prev may be carried in fp32
+    z = matmul(A=h_prev.to(W.dtype), B=W, C=x, output_dtype=tl.float32)
     z = tanh(z, output_dtype=x.dtype)
 
+    # keep the carried state in fp32 regardless of input dtypes: mixed-precision callers
+    # (e.g. an fp32 forget gate with bf16 activations under autocast) must not change the
+    # loop-carried type, which triton requires to be stable across iterations
     h = f * h_prev + (1 - f) * z
+    h = h.to(tl.float32)
 
     return z, h
 
@@ -94,7 +99,7 @@ def _m2rnn_forward(
     )
 
     if h0_ptr is None:
-        h = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_V), dtype=k_ptr.dtype.element_ty)
+        h = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_V), dtype=tl.float32)
     else:
         h = tl.load(
             h0_ptr
@@ -103,7 +108,7 @@ def _m2rnn_forward(
             + BLOCK_K[:, None] * h0_stride[2]
             + BLOCK_V[None, :] * h0_stride[3],
             mask=MASK_KV,
-        )
+        ).to(tl.float32)
 
     IS_VARLEN: tl.constexpr = cu_seqlens_ptr is not None
     S_DIM: tl.constexpr = 1 - IS_VARLEN

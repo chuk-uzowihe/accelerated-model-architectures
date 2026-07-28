@@ -90,8 +90,10 @@ def _m2rnn_backward_triton_kernel(
         mask=MASK_VV,
     )
 
+    # dh is loop-carried: keep it fp32 so its type is independent of input dtypes
+    # (mixed-precision callers) and stable across iterations, as triton requires
     if dht_ptr is None:
-        dh = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_V), dtype=W_ptr.dtype.element_ty)
+        dh = tl.zeros((BLOCK_SIZE_K, BLOCK_SIZE_V), dtype=tl.float32)
     else:
         dh = tl.load(
             dht_ptr
@@ -100,7 +102,7 @@ def _m2rnn_backward_triton_kernel(
             + BLOCK_K[:, None] * dht_stride[2]
             + BLOCK_V[None, :] * dht_stride[3],
             mask=MASK_KV,
-        )
+        ).to(tl.float32)
 
     dW = tl.zeros((BLOCK_SIZE_V, BLOCK_SIZE_V), dtype=tl.float32)
 
@@ -235,7 +237,7 @@ def _m2rnn_backward_triton_kernel(
         dz = dyh * (1 - f)
 
         dx = dz * tanh_backward(z)
-        dh = matmul(A=dx, B=W.T, C=dh, output_dtype=dx.dtype)
+        dh = matmul(A=dx, B=W.T, C=dh, output_dtype=tl.float32)
         dW = matmul(A=h_prev.T, B=dx, C=dW, output_dtype=dW.dtype)
 
         dv = matmul(A=dx.T, B=k[:, None], C=None, output_dtype=k.dtype)
